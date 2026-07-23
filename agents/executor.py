@@ -1,16 +1,14 @@
 """
-Executor agent — Phase 2 implementation.
+Executor agent — Phase 3 update.
 
-Walks through the Planner's steps and produces a result for each one.
-Real external actions (actual web search, actual email sending) are
-NOT wired in yet — that's Phase 4, gated behind dry-run mode and
-domain allow-listing. For now, the Executor asks the LLM to produce
-a realistic *simulated* outcome per step, so the full orchestration
-loop and handoff logic can be built and tested end to end first.
+Same simulated-execution approach as Phase 2, but now every exception
+is classified (retryable vs terminal) so the orchestrator's retry loop
+knows what to do with it, instead of treating all failures the same.
 """
 
 from agents.base_agent import BaseAgent, AgentInput, AgentOutput
 from core.llm_client import LLMClient
+from core.errors import classify_exception
 
 SYSTEM_PROMPT = """You are a task execution agent. You will be given one
 step from a plan. Produce a short, realistic result for completing that
@@ -54,12 +52,18 @@ class ExecutorAgent(BaseAgent):
                 )
 
             except Exception as e:
+                failure_type = classify_exception(e)
+                step_results.append({
+                    "step": step,
+                    "outcome": None,
+                    "error": str(e),
+                    "failure_type": failure_type.value,
+                })
                 self.log_decision(
                     detail=f"Step {i} failed: {step}",
-                    reasoning=f"LLM call or JSON parsing raised: {str(e)}",
-                    data={"error": str(e)},
+                    reasoning=f"Classified as {failure_type.value}: {str(e)}",
+                    data={"error": str(e), "failure_type": failure_type.value},
                 )
-                step_results.append({"step": step, "outcome": None, "error": str(e)})
 
         all_succeeded = all(r.get("outcome") is not None for r in step_results)
 

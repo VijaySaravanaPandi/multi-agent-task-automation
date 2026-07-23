@@ -1,8 +1,12 @@
 """
-Entry point / orchestrator.
-Phase 2: real Planner -> Executor -> Verifier loop, with full context
-handoffs logged at each transition so the trace shows not just what
-each agent decided, but what it was given to decide with.
+Entry point / orchestrator — Phase 3.
+
+Adds a supervisor retry loop: after verification, any step that failed
+AND is classified retryable gets re-executed, up to MAX_RETRIES times.
+Terminal failures are never retried — they're reported immediately.
+This is the concrete answer to "how do you avoid infinite retry loops":
+a hard cap, plus a classification step that refuses to retry things
+that can't succeed no matter how many times you try.
 """
 
 import uuid
@@ -12,21 +16,19 @@ from agents.base_agent import AgentInput
 from agents.planner import PlannerAgent
 from agents.executor import ExecutorAgent
 from agents.verifier import VerifierAgent
+from core.errors import FailureType
+
+MAX_RETRIES = 2
 
 
 def run_task(goal: str):
     task_id = str(uuid.uuid4())
     logger = StructuredLogger(task_id=task_id)
-
     task = TaskState(task_id=task_id, goal=goal, status=TaskStatus.IN_PROGRESS)
 
-    logger.log_event(
-        agent_name="system",
-        event_type="task_start",
-        detail=f"Task {task.task_id} started",
-        reasoning="Beginning Phase 2 orchestration loop",
-        data={"goal": task.goal},
-    )
+    logger.log_event("system", "task_start", f"Task {task.task_id} started",
+                      reasoning="Beginning Phase 3 orchestration loop with retry supervision",
+                      data={"goal": task.goal})
 
     planner = PlannerAgent(logger)
     executor = ExecutorAgent(logger)
@@ -38,49 +40,70 @@ def run_task(goal: str):
         task.status = TaskStatus.FAILED
         logger.log_event("system", "task_end", "Task failed at planning stage",
                           reasoning=plan_output.reasoning)
+        print(f"\nDone. Status: {task.status.value}")
         return
 
-    logger.log_event(
-        agent_name="system",
-        event_type="handoff",
-        detail="planner -> executor",
-        reasoning="Passing generated plan as context to Executor",
-        data={"plan": plan_output.result},
-    )
+    steps_to_run = plan_output.result
+    final_results = {}  # step -> latest result dict
+    attempt = 0
 
-    # --- Executor ---
-    exec_output = executor.run(AgentInput(goal=goal, context={"plan": plan_output.result}))
-    task.steps_completed = [r["step"] for r in exec_output.result if r.get("outcome")]
-    task.steps_remaining = [r["step"] for r in exec_output.result if not r.get("outcome")]
+    while steps_to_run and attempt <= MAX_RETRIES:
+        attempt += 1
+        logger.log_event("system", "handoff", f"planner/retry -> executor (attempt {attempt})",
+                          reasoning="Executing current retry batch of steps",
+                          data={"steps": steps_to_run})
 
-    logger.log_event(
-        agent_name="system",
-        event_type="handoff",
-        detail="executor -> verifier",
-        reasoning="Passing execution results as context to Verifier",
-        data={"execution_results": exec_output.result},
-    )
+        exec_output = executor.run(AgentInput(goal=goal, context={"plan": steps_to_run}))
+        for r in exec_output.result:
+            final_results[r["step"]] = r
 
-    # --- Verifier (still stub logic — real checks in Phase 3) ---
-    verify_output = verifier.run(AgentInput(goal=goal, context={"execution": exec_output.result}))
+        logger.log_event("system", "handoff", "executor -> verifier",
+                          reasoning="Passing execution results as context to Verifier",
+                          data={"execution_results": exec_output.result})
 
-    task.status = TaskStatus.COMPLETED if exec_output.success else TaskStatus.FAILED
+        verify_output = verifier.run(AgentInput(goal=goal, context={"execution": exec_output.result}))
+        for v in verify_output.result:
+            final_results[v["step"]]["passed"] = v["passed"]
+            final_results[v["step"]]["verify_reasoning"] = v["reasoning"]
+            final_results[v["step"]]["failure_type"] = v.get("failure_type")
 
-    logger.log_event(
-        agent_name="system",
-        event_type="task_end",
-        detail=f"Task {task.task_id} finished with status {task.status.value}",
-        reasoning="Orchestration loop complete",
-        data={
-            "steps_completed": task.steps_completed,
-            "steps_remaining": task.steps_remaining,
-        },
-    )
+        # Decide what to retry: only steps that failed AND are retryable.
+        retry_batch = []
+        for v in verify_output.result:
+            if not v["passed"]:
+                if v.get("failure_type") == FailureType.RETRYABLE.value and attempt <= MAX_RETRIES:
+                    retry_batch.append(v["step"])
+                else:
+                    logger.log_event(
+                        "system", "decision",
+                        f"Not retrying step: {v['step'][:60]}",
+                        reasoning=(
+                            f"Failure type is {v.get('failure_type')}, "
+                            f"or max retries ({MAX_RETRIES}) reached"
+                        ),
+                    )
 
-    print(f"\nDone. Status: {task.status.value}")
+        steps_to_run = retry_batch
+        if steps_to_run:
+            logger.log_event("system", "decision", f"Retrying {len(steps_to_run)} step(s)",
+                              reasoning=f"Retry attempt {attempt} of {MAX_RETRIES}",
+                              data={"retry_steps": steps_to_run})
+
+    task.steps_completed = [s for s, r in final_results.items() if r.get("passed")]
+    task.steps_remaining = [s for s, r in final_results.items() if not r.get("passed")]
+    task.status = TaskStatus.COMPLETED if not task.steps_remaining else TaskStatus.FAILED
+
+    logger.log_event("system", "task_end", f"Task {task.task_id} finished with status {task.status.value}",
+                      reasoning=f"Completed after {attempt} attempt(s)",
+                      data={
+                          "steps_completed": task.steps_completed,
+                          "steps_remaining": task.steps_remaining,
+                      })
+
+    print(f"\nDone. Status: {task.status.value} (after {attempt} attempt(s))")
     print(f"Check logs/{task_id}.jsonl for the full structured trace.")
 
 
 if __name__ == "__main__":
-    goal = input("Enter a task goal (e.g. 'Research the benefits of solar energy and draft a summary report'): ")
+    goal = input("Enter a task goal: ")
     run_task(goal)
