@@ -22,12 +22,3 @@ pip install -r requirements.txt
 copy .env.example .env
 \`\`\`
 
-## Roadmap
-- [x] Phase 1: Scaffolding, BaseAgent, state, logging
-- [ ] Phase 2: Planner + Executor + basic orchestration loop
-- [ ] Phase 3: Verifier + error recovery + retry classification
-- [ ] Phase 4: Real external integrations (search, email) + dry-run/safety guardrails
-- [ ] Phase 5: Observability (decision trace, structured logs, "what happened and why")
-- [ ] Phase 6: Evaluation suite + regression checks
-- [ ] Phase 7: Human-in-the-loop approval for high-stakes actions
-- [ ] Phase 8: Cost/latency accounting + optimization

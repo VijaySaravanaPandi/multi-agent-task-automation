@@ -1,7 +1,6 @@
 """
 Central configuration for the system.
-Phase 1: just loads environment variables and exposes typed settings.
-Later phases (4, 7, 8) will extend this with risk tiers, cost limits, etc.
+Phase 2 adds Groq LLM settings on top of Phase 1's env loading.
 """
 
 import os
@@ -11,11 +10,13 @@ load_dotenv()
 
 
 class Settings:
-    # Dry-run defaults to True so nothing external ever fires by accident.
     DRY_RUN_MODE: bool = os.getenv("DRY_RUN_MODE", "true").lower() == "true"
 
-    OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
-    ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
+    GROQ_API_KEY_1: str = os.getenv("GROQ_API_KEY_1", "")
+    GROQ_API_KEY_2: str = os.getenv("GROQ_API_KEY_2", "")
+    GROQ_MODEL: str = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+    GROQ_API_URL: str = "https://api.groq.com/openai/v1/chat/completions"
+
     SEARCH_API_KEY: str = os.getenv("SEARCH_API_KEY", "")
 
     EMAIL_SMTP_HOST: str = os.getenv("EMAIL_SMTP_HOST", "")
