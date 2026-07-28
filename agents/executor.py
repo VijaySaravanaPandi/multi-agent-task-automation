@@ -1,10 +1,11 @@
 """
-Executor agent — Phase 4.
+Executor agent — Phase 8 fix.
 
-Now classifies each step by action type (search / email / other) and
-routes to real tools for search and email instead of simulating.
-Email is still gated by dry-run + domain allow-list inside tools.py
-regardless of what the Executor decides.
+Now carries forward accumulated results from earlier steps in the same
+run, so steps like "extract from the search results" can actually see
+prior outputs instead of guessing a brand-new search. This closes the
+gap where the LLM misclassified analysis steps as search steps simply
+because no prior context was available to work from.
 """
 
 from agents.base_agent import BaseAgent, AgentInput, AgentOutput
@@ -13,12 +14,21 @@ from core.errors import classify_exception
 from core.tools import search_web, agent_requests_email, send_email, ToolError
 from core.risk import get_risk_tier, RiskTier
 from core.approval import request_human_approval
+
 SYSTEM_PROMPT = """You are a task execution agent. You will be given one
-step from a plan. Decide what kind of action this step needs:
-- "search": if it requires finding information online
+step from a plan, plus any results already produced by earlier steps in
+this same task (if any).
+
+Decide what kind of action this step needs:
+- "search": ONLY if this step requires finding NEW information online
+  that isn't already available in the prior results shown to you.
 - "email": if it requires sending an email (only if the step explicitly
-  mentions sending/emailing something to someone)
-- "other": anything else (drafting, summarizing, analysis) — simulate the result
+  mentions sending/emailing something to someone).
+- "other": if this step analyzes, extracts, filters, ranks, or summarizes
+  information that was ALREADY gathered in a prior step. If prior results
+  are provided below and this step references "the results", "the search",
+  or similar, you MUST use those prior results and classify as "other" —
+  do NOT perform a new search.
 
 Respond ONLY with valid JSON in this exact shape, no other text:
 {
@@ -27,7 +37,7 @@ Respond ONLY with valid JSON in this exact shape, no other text:
   "email_to": "recipient address if action_type is email, else empty string",
   "email_subject": "subject if action_type is email, else empty string",
   "email_body": "body if action_type is email, else empty string",
-  "result": "short description of the outcome if action_type is other, else empty string",
+  "result": "if action_type is other, produce the ACTUAL extracted/summarized content using prior results provided, not a placeholder description",
   "reasoning": "why you classified and handled it this way"
 }"""
 
@@ -41,6 +51,8 @@ class ExecutorAgent(BaseAgent):
 
     def run(self, agent_input: AgentInput) -> AgentOutput:
         steps = agent_input.context.get("plan", [])
+        prior_results = agent_input.context.get("prior_results", {})
+
         if not steps:
             self.log_decision(detail="No steps to execute", reasoning="Empty plan received")
             return AgentOutput(success=False, result=None, reasoning="Empty plan", next_agent=None)
@@ -48,7 +60,12 @@ class ExecutorAgent(BaseAgent):
         step_results = []
         for i, step in enumerate(steps, start=1):
             try:
-                decision = self.llm.complete_json(SYSTEM_PROMPT, f"Step {i}: {step}")
+                prior_context = self._format_prior_results(prior_results)
+                user_prompt = f"Step {i}: {step}"
+                if prior_context:
+                    user_prompt += f"\n\nResults already available from earlier steps:\n{prior_context}"
+
+                decision = self.llm.complete_json(SYSTEM_PROMPT, user_prompt)
                 action_type = decision.get("action_type", "other")
                 reasoning = decision.get("reasoning", "")
 
@@ -65,6 +82,9 @@ class ExecutorAgent(BaseAgent):
                     )
 
                 step_results.append({"step": step, "action_type": action_type, "outcome": outcome})
+                # Feed this step's outcome forward so later steps in the
+                # SAME batch can reference it too.
+                prior_results[step] = outcome
 
             except Exception as e:
                 failure_type = classify_exception(e)
@@ -85,6 +105,21 @@ class ExecutorAgent(BaseAgent):
             reasoning=f"Executed {len(steps)} steps, {'all succeeded' if all_succeeded else 'some failed'}",
             next_agent="verifier",
         )
+
+    def _format_prior_results(self, prior_results: dict) -> str:
+        if not prior_results:
+            return ""
+        parts = []
+        for step, outcome in prior_results.items():
+            if isinstance(outcome, list):  # search results
+                snippet = "; ".join(
+                    f"{r.get('title', '')}: {r.get('content', '')[:150]}"
+                    for r in outcome if isinstance(r, dict)
+                )
+                parts.append(f"- From step \"{step}\": {snippet}")
+            elif isinstance(outcome, str) and outcome:
+                parts.append(f"- From step \"{step}\": {outcome}")
+        return "\n".join(parts)
 
     def _handle_search(self, step, decision, i, reasoning):
         query = decision.get("search_query", "") or step
@@ -109,7 +144,6 @@ class ExecutorAgent(BaseAgent):
         subject = decision.get("email_subject", "")
         body = decision.get("email_body", "")
 
-        # Step A: log the AGENT'S DECISION to send.
         intent = agent_requests_email(to, subject, body)
         self.log_decision(
             detail=f"Agent DECIDED to send email for step {i}",
@@ -117,7 +151,6 @@ class ExecutorAgent(BaseAgent):
             data={"intent": intent},
         )
 
-        # Step B: risk check — email is HIGH risk, so pause for a human.
         risk_tier = get_risk_tier("email")
         self.logger.log_event(
             agent_name="system",
@@ -145,8 +178,6 @@ class ExecutorAgent(BaseAgent):
                     "reason": "Blocked: human did not approve this high-stakes action",
                 }
 
-        # Step C: the SYSTEM'S actual action — still gated internally
-        # by dry-run + domain allow-list even after human approval.
         result = send_email(to=to, subject=subject, body=body)
         self.logger.log_event(
             agent_name="system",

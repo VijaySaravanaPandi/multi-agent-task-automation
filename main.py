@@ -51,6 +51,7 @@ def run_task(goal: str):
 
     steps_to_run = plan_output.result
     final_results = {}  # step -> latest result dict
+    prior_results = {}  # step -> outcome, carried across attempts for context
     attempt = 0
 
     while steps_to_run and attempt <= MAX_RETRIES:
@@ -59,7 +60,7 @@ def run_task(goal: str):
                           reasoning="Executing current retry batch of steps",
                           data={"steps": steps_to_run})
 
-        exec_output = executor.run(AgentInput(goal=goal, context={"plan": steps_to_run}))
+        exec_output = executor.run(AgentInput(goal=goal, context={"plan": steps_to_run, "prior_results": prior_results}))
         for r in exec_output.result:
             final_results[r["step"]] = r
 
