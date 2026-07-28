@@ -11,12 +11,15 @@ that can't succeed no matter how many times you try.
 
 import uuid
 from core.logger import StructuredLogger
+from core.trace_reader import render_trace
 from core.state import TaskState, TaskStatus
 from agents.base_agent import AgentInput
 from agents.planner import PlannerAgent
 from agents.executor import ExecutorAgent
 from agents.verifier import VerifierAgent
 from core.errors import FailureType
+from core.logger import StructuredLogger
+
 
 MAX_RETRIES = 2
 
@@ -101,7 +104,7 @@ def run_task(goal: str):
                       })
 
     print(f"\nDone. Status: {task.status.value} (after {attempt} attempt(s))")
-    print(f"Check logs/{task_id}.jsonl for the full structured trace.")
+    print(render_trace(task_id))
 
 
 if __name__ == "__main__":
