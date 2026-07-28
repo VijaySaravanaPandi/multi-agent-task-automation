@@ -32,7 +32,20 @@ class ToolError(Exception):
 # reading the web has no side effects on anyone else).
 # ---------------------------------------------------------------------
 
+_search_cache: dict[str, list[dict]] = {}
+
+
 def search_web(query: str, max_results: int = 3) -> list[dict]:
+    """
+    Deliberate cost optimization: identical queries within the same
+    process return the cached result instead of hitting Tavily again.
+    This directly avoids paying for (and waiting on) redundant search
+    calls when the Planner produces overlapping steps.
+    """
+    cache_key = f"{query.strip().lower()}::{max_results}"
+    if cache_key in _search_cache:
+        return _search_cache[cache_key]
+
     if not settings.SEARCH_API_KEY:
         raise ToolError("SEARCH_API_KEY is not set — cannot perform real search")
 
@@ -48,10 +61,12 @@ def search_web(query: str, max_results: int = 3) -> list[dict]:
         )
         response.raise_for_status()
         data = response.json()
-        return [
+        results = [
             {"title": r.get("title", ""), "url": r.get("url", ""), "content": r.get("content", "")}
             for r in data.get("results", [])
         ]
+        _search_cache[cache_key] = results
+        return results
     except requests.exceptions.RequestException as e:
         raise ToolError(f"Search request failed: {str(e)}")
 

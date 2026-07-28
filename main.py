@@ -19,7 +19,7 @@ from agents.executor import ExecutorAgent
 from agents.verifier import VerifierAgent
 from core.errors import FailureType
 from core.logger import StructuredLogger
-
+import time
 
 MAX_RETRIES = 2
 
@@ -36,6 +36,9 @@ def run_task(goal: str):
     planner = PlannerAgent(logger)
     executor = ExecutorAgent(logger)
     verifier = VerifierAgent(logger)
+    agents_with_llm = [planner, executor, verifier]
+
+    task_start_time = time.time()
 
     # --- Planner ---
     plan_output = planner.run(AgentInput(goal=goal, context={}))
@@ -103,8 +106,31 @@ def run_task(goal: str):
                           "steps_remaining": task.steps_remaining,
                       })
 
+    total_wall_time = round(time.time() - task_start_time, 2)
+    usage_totals = {"call_count": 0, "total_input_tokens": 0, "total_output_tokens": 0,
+                     "total_tokens": 0, "total_latency_seconds": 0.0}
+    for a in agents_with_llm:
+        u = a.llm.get_usage_summary()
+        for k in usage_totals:
+            usage_totals[k] += u[k]
+    usage_totals["total_latency_seconds"] = round(usage_totals["total_latency_seconds"], 2)
+
+    logger.log_event(
+        agent_name="system",
+        event_type="cost_summary",
+        detail=f"Task cost/latency: {usage_totals['total_tokens']} tokens, "
+               f"{usage_totals['total_latency_seconds']}s LLM time, {total_wall_time}s wall time",
+        reasoning="End-of-task accounting across all agents",
+        data={**usage_totals, "total_wall_time_seconds": total_wall_time},
+    )
+
     print(f"\nDone. Status: {task.status.value} (after {attempt} attempt(s))")
     print(render_trace(task_id))
+    print(f"\n💰 Cost/Latency Summary:")
+    print(f"   LLM calls: {usage_totals['call_count']}")
+    print(f"   Total tokens: {usage_totals['total_tokens']} (in: {usage_totals['total_input_tokens']}, out: {usage_totals['total_output_tokens']})")
+    print(f"   Total LLM time: {usage_totals['total_latency_seconds']}s")
+    print(f"   Total wall time: {total_wall_time}s")
 
 
 if __name__ == "__main__":
