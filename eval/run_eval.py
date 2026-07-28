@@ -5,6 +5,9 @@ Runs every case in TEST_CASES through the real orchestration pipeline,
 scores each one against its expectations, and appends a summary to
 results_history.jsonl so score-over-time (regression detection) is
 possible: did a later prompt change make things worse?
+
+Human-approval gates are auto-approved during eval runs (patched below)
+since eval measures agent/system behavior, not a human's presence.
 """
 
 import json
@@ -12,6 +15,7 @@ import os
 import sys
 import uuid
 from datetime import datetime, timezone
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -40,7 +44,6 @@ def run_single_case(case: dict) -> dict:
 
     plan_output = planner.run(AgentInput(goal=goal, context={}))
     checks = {}
-    passed_all = True
 
     if not plan_output.success:
         return _fail_result(case, task_id, "Planner failed", checks)
@@ -109,12 +112,15 @@ def _fail_result(case, task_id, reason, checks):
 
 def run_eval():
     results = []
-    for case in TEST_CASES:
-        print(f"Running eval case: {case['id']} ...")
-        result = run_single_case(case)
-        results.append(result)
-        status = "PASS" if result["passed"] else "FAIL"
-        print(f"  -> {status}  checks={result['checks']}")
+    # Auto-approve all human-approval gates during automated eval runs —
+    # eval measures agent/system behavior, not a human's presence.
+    with patch("core.approval.request_human_approval", return_value=True):
+        for case in TEST_CASES:
+            print(f"Running eval case: {case['id']} ...")
+            result = run_single_case(case)
+            results.append(result)
+            status = "PASS" if result["passed"] else "FAIL"
+            print(f"  -> {status}  checks={result['checks']}")
 
     total = len(results)
     passed = sum(1 for r in results if r["passed"])

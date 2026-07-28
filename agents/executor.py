@@ -11,7 +11,8 @@ from agents.base_agent import BaseAgent, AgentInput, AgentOutput
 from core.llm_client import LLMClient
 from core.errors import classify_exception
 from core.tools import search_web, agent_requests_email, send_email, ToolError
-
+from core.risk import get_risk_tier, RiskTier
+from core.approval import request_human_approval
 SYSTEM_PROMPT = """You are a task execution agent. You will be given one
 step from a plan. Decide what kind of action this step needs:
 - "search": if it requires finding information online
@@ -108,8 +109,7 @@ class ExecutorAgent(BaseAgent):
         subject = decision.get("email_subject", "")
         body = decision.get("email_body", "")
 
-        # Step A: log the AGENT'S DECISION to send — this happens
-        # regardless of what actually ends up transmitting.
+        # Step A: log the AGENT'S DECISION to send.
         intent = agent_requests_email(to, subject, body)
         self.log_decision(
             detail=f"Agent DECIDED to send email for step {i}",
@@ -117,8 +117,36 @@ class ExecutorAgent(BaseAgent):
             data={"intent": intent},
         )
 
-        # Step B: the SYSTEM'S actual action — separately logged,
-        # and gated internally by dry-run + domain allow-list.
+        # Step B: risk check — email is HIGH risk, so pause for a human.
+        risk_tier = get_risk_tier("email")
+        self.logger.log_event(
+            agent_name="system",
+            event_type="decision",
+            detail=f"Risk tier for step {i} email action: {risk_tier.value}",
+            reasoning="Email is classified high-stakes; requires human approval before sending",
+        )
+
+        if risk_tier == RiskTier.HIGH:
+            approved = request_human_approval(
+                action_description=f"Send email (step {i}: {step})",
+                details={"to": to, "subject": subject, "body": body[:200]},
+            )
+            self.logger.log_event(
+                agent_name="system",
+                event_type="decision",
+                detail=f"Human approval for step {i} email: {'APPROVED' if approved else 'DENIED'}",
+                reasoning="Human-in-the-loop gate result",
+                data={"approved": approved},
+            )
+            if not approved:
+                return {
+                    "sent": False,
+                    "dry_run": None,
+                    "reason": "Blocked: human did not approve this high-stakes action",
+                }
+
+        # Step C: the SYSTEM'S actual action — still gated internally
+        # by dry-run + domain allow-list even after human approval.
         result = send_email(to=to, subject=subject, body=body)
         self.logger.log_event(
             agent_name="system",
